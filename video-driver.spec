@@ -8,7 +8,6 @@ Summary:        DKMS package for MSM VIDC video driver (out-of-tree)
 License:        GPL-2.0-only
 URL:            https://github.com/qualcomm-linux/video-driver
 
-#Source0:        https://github.com/qualcomm-linux/video-driver/archive/refs/tags/v%{version}.tar.gz#/%{name}-%{version}.tar.gz
 Source0:        https://github.com/qualcomm-linux/video-driver/archive/refs/tags/v%{version}.tar.gz#/video-driver-%{version}.tar.gz
 
 # Conflicts with the in-tree Qualcomm iris driver
@@ -16,13 +15,7 @@ Conflicts:      qcom-iris-dkms
 
 BuildArch:      noarch
 
-# ---------------------------------------------------------------
-# Runtime dependencies
-# ---------------------------------------------------------------
 Requires:       dkms
-# kernel-devel provides the kernel headers needed by DKMS at build time.
-# Listed as a weak dependency because custom/vendor kernels may supply
-# headers through a different mechanism.
 Recommends:     kernel-devel
 
 %description
@@ -36,44 +29,23 @@ enable the appropriate configuration macros (CONFIG_MSM_VIDC_QLI).
 
 Supported platforms: hamoa, lemans, monaco, kodiak, purwa.
 
-# ---------------------------------------------------------------
 # Prep — unpack the source tarball
-# ---------------------------------------------------------------
 %prep
 %autosetup -n video-driver-%{version}
 
-# ---------------------------------------------------------------
-# Build — nothing to compile at RPM build time.
-# The actual kernel module is compiled at install time by DKMS.
-# ---------------------------------------------------------------
 %build
-# intentionally empty — DKMS builds on the target machine
 
-# ---------------------------------------------------------------
-# Install — stage all files into the buildroot
-# ---------------------------------------------------------------
 %install
 # 1. Install driver source into DKMS source tree
 DKMS_SRC_DIR=%{buildroot}/usr/src/%{name}-%{version}
 install -d "${DKMS_SRC_DIR}"
 
-# Copy all driver source files
 cp -r . "${DKMS_SRC_DIR}/"
 
-# 1b. Patch video/Kbuild: append -Wno-error=attributes after the existing
-#     -Werror line so the module can be compiled with GCC < 16 against a
-#     kernel built with GCC 16+.  GCC 16 introduced the 'counted_by'
-#     attribute; older compilers emit a warning that -Werror would otherwise
-#     promote to a fatal error.  The more-specific -Wno-error=attributes
-#     must come AFTER -Werror so it takes precedence.
 sed -i '/^ccflags-y += -Werror$/a ccflags-y += -Wno-error=attributes' \
     "${DKMS_SRC_DIR}/video/Kbuild"
 
 # 2. Install dkms.conf with the correct version substituted.
-#    Also strip deprecated CLEAN and REMAKE_INITRD directives that
-#    produce warnings (and can cause failures) with DKMS >= 3.0.
-#    Fix BUILT_MODULE_LOCATION: the module lands in video/ (Kbuild has
-#    obj-m := video/), not in the build root, so DKMS must look there.
 sed -e "s/PACKAGE_VERSION=\"[^\"]*\"/PACKAGE_VERSION=\"%{version}\"/" \
     -e '/^CLEAN[[:space:]]*=/d' \
     -e '/^REMAKE_INITRD[[:space:]]*=/d' \
@@ -81,9 +53,6 @@ sed -e "s/PACKAGE_VERSION=\"[^\"]*\"/PACKAGE_VERSION=\"%{version}\"/" \
     pkg-iris-vpu/dkms.conf > "${DKMS_SRC_DIR}/dkms.conf"
 
 # 3. Install modprobe blacklist — blacklists qcom_iris (in-tree driver)
-#    Placed in /usr/lib/modprobe.d/ so it:
-#      a) is included in initramfs for early-boot blacklisting
-#      b) is automatically cleaned up on package removal
 install -d %{buildroot}/usr/lib/modprobe.d
 install -m 644 pkg-iris-vpu/debian/modprobe.d/iris-vpu-dkms.conf \
               %{buildroot}/usr/lib/modprobe.d/iris-vpu-dkms.conf
@@ -95,38 +64,18 @@ install -m 755 pkg-iris-vpu/debian/iris-vpu-load.sh \
 
 # 5. Install helper scripts required by dkms-build-wrapper at DKMS build time
 install -d "${DKMS_SRC_DIR}/scripts"
-# Install the remaining scripts unchanged from the tarball.
 install -m 755 pkg-iris-vpu/scripts/detect-platform.sh     "${DKMS_SRC_DIR}/scripts/"
 install -m 755 pkg-iris-vpu/scripts/set-build-env.sh       "${DKMS_SRC_DIR}/scripts/"
 install -m 755 pkg-iris-vpu/scripts/cross-compile.sh       "${DKMS_SRC_DIR}/scripts/"
-# Write a corrected dkms-build-wrapper.sh directly.
-# The version in the tarball uses "set -e" and hard-fails when
-# detect-platform.sh cannot find device-tree paths (common on CentOS/RHEL).
-# This version:
-#   - removes "set -e" so platform detection is best-effort
-#   - detects git-hash kernel suffixes (e.g. 6.18.37-g48143db58c4c)
-#   - uses DKMS-provided $kernelver instead of $(uname -r)
-#   - falls back to the default QLI config when platform detection fails
-cat > "${DKMS_SRC_DIR}/scripts/dkms-build-wrapper.sh" << 'WRAPPER_EOF'
-#!/bin/bash
-# SPDX-License-Identifier: GPL-2.0-only
-# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 
-# NOTE: Do NOT use "set -e" here.  Platform detection is best-effort; a
-# failure must fall back to the default QLI config rather than aborting
-# the entire DKMS build with a non-zero exit status.
+cat > "${DKMS_SRC_DIR}/scripts/dkms-build-wrapper.sh" << 'WRAPPER_EOF'
 
 echo "Starting DKMS build for iris-vpu..."
 
-# Prefer the kernel version supplied by DKMS ($kernelver); fall back to
-# the running kernel so the script also works when invoked manually.
 KERNEL_VERSION="${kernelver:-$(uname -r)}"
 KERNEL_ARCH="${arch:-$(uname -m)}"
 echo "Target kernel: $KERNEL_VERSION ($KERNEL_ARCH)"
 
-# Custom/development kernel detection.
-# Covers: -dirty builds, release-candidates (rc), and kernels whose
-# version string contains a git-hash suffix (e.g. 6.18.37-g48143db58c4c).
 if [[ "$KERNEL_VERSION" == *"-dirty" ]] || \
    [[ "$KERNEL_VERSION" == *"rc"* ]]   || \
    [[ "$KERNEL_VERSION" =~ -g[0-9a-f]{7,} ]]; then
@@ -135,9 +84,6 @@ if [[ "$KERNEL_VERSION" == *"-dirty" ]] || \
     export IGNORE_CC_MISMATCH=1
 fi
 
-# Detect platform from device tree (best-effort).
-# On systems where /proc/device-tree paths are absent the script exits 1;
-# we suppress that error and fall through to the default QLI config.
 echo "Detecting platform from device tree..."
 COMPATIBLE=$($(dirname "$0")/detect-platform.sh 2>/dev/null) || true
 
@@ -149,26 +95,13 @@ if [ -n "$COMPATIBLE" ]; then
 else
     echo "Warning: Platform detection failed or returned empty result." >&2
     echo "Falling back to default QLI configuration (qli_video.conf)." >&2
-    # No platform-specific variables are exported; video/Kbuild will
-    # fall through to its else-branch and include qli_video.conf.
 fi
 
-# Build arguments.
-# KERNEL_SRC must be passed explicitly so that video/Kbuild can locate
-# kernel headers for the UBWC-helpers detection check:
-#   grep -qs 'qcom_ubwc_min_acc_length_64b' $(KERNEL_SRC)/include/linux/soc/qcom/ubwc.h
-# Without it the grep silently fails, MSM_VIDC_HAS_QCOM_UBWC_HELPERS is
-# left unset, and the driver redefines functions already in the kernel header.
 MAKE_ARGS="M=$(pwd) VIDEO_ROOT=$(pwd) KERNEL_SRC=/lib/modules/${KERNEL_VERSION}/build modules"
 if [[ "$KERNEL_VERSION" == *"-dirty" ]]; then
     MAKE_ARGS="$MAKE_ARGS CONFIG_CC_VERSION_TEXT=\"\""
 fi
 
-# Build the module.
-# Capture the exit status explicitly — without set -e the shell would
-# otherwise continue to the echo below and exit 0 even when make fails,
-# masking the failure from DKMS ("Building module(s)... done." / exit 0
-# while the module was never actually produced).
 echo "Building kernel module..."
 make -C "/lib/modules/${KERNEL_VERSION}/build" $MAKE_ARGS
 BUILD_STATUS=$?
@@ -181,9 +114,6 @@ echo "Build completed successfully!"
 WRAPPER_EOF
 chmod 755 "${DKMS_SRC_DIR}/scripts/dkms-build-wrapper.sh"
 
-# ---------------------------------------------------------------
-# Files
-# ---------------------------------------------------------------
 %files
 %license LICENSE.txt
 %doc pkg-iris-vpu/README.md
@@ -191,15 +121,6 @@ chmod 755 "${DKMS_SRC_DIR}/scripts/dkms-build-wrapper.sh"
 /usr/lib/modprobe.d/iris-vpu-dkms.conf
 /usr/lib/iris-vpu-dkms/iris-vpu-load.sh
 
-# ---------------------------------------------------------------
-# %post — runs after the RPM is installed on the target machine
-# Translated from: pkg-iris-vpu/debian/postinst
-#
-# IMPORTANT: Do NOT use "set -e" in RPM scriptlets.  Any unhandled
-# non-zero exit would make dnf/rpm report a scriptlet failure and
-# potentially roll back the transaction.  All errors are handled
-# explicitly below; the scriptlet always exits 0.
-# ---------------------------------------------------------------
 %post
 
 KERNEL_VERSION=$(uname -r)
@@ -221,7 +142,6 @@ echo "Registering iris-vpu module source with DKMS..."
 dkms add -m "$MODULE_NAME" -v "$DRIVER_VERSION" 2>/dev/null || true
 
 # 3. Build the module via DKMS
-#    --force ensures a clean rebuild even if a partial build state exists.
 echo "Building iris-vpu module via DKMS..."
 if dkms build --force -m "$MODULE_NAME" -v "$DRIVER_VERSION" -k "$KERNEL_VERSION"; then
     DKMS_BUILD_SUCCESS=true
@@ -284,8 +204,6 @@ if [ "$QCOM_IRIS_WAS_LOADED" = true ]; then
 fi
 
 # 7. Blacklist qcom_iris in /etc/modprobe.d/ (runtime, not initramfs-managed)
-#    This is done regardless of whether the DKMS build succeeded so that
-#    the in-tree driver does not re-load on the next boot.
 echo "Adding qcom_iris to module blacklist..."
 if [ -f "$BLACKLIST_FILE" ]; then
     if ! grep -q "blacklist qcom_iris" "$BLACKLIST_FILE"; then
@@ -329,15 +247,9 @@ if [ "$DKMS_BUILD_SUCCESS" = true ]; then
     fi
 fi
 
-# Always exit 0 — DKMS build failures must not abort the RPM transaction.
 exit 0
 
-# ---------------------------------------------------------------
-# %preun — runs before the RPM is removed from the target machine
-# Translated from: pkg-iris-vpu/debian/prerm
-# ---------------------------------------------------------------
 %preun
-# Note: no set -e — handle errors gracefully so removal always succeeds.
 
 KERNEL_VERSION=$(uname -r)
 DRIVER_VERSION="%{version}"
@@ -388,9 +300,6 @@ rm -f /etc/modprobe.d/blacklist-video.conf || true
 echo "iris-vpu pre-removal completed."
 exit 0
 
-# ---------------------------------------------------------------
-# Changelog
-# ---------------------------------------------------------------
 %changelog
 * Mon Jul 28 2026 Qualcomm Technologies, Inc. <linux-qcom@qualcomm.com> - 1.0.20-3
 - Fix: pass KERNEL_SRC=/lib/modules/$kernelver/build to make so that
