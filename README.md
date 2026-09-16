@@ -2,98 +2,165 @@
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 SPDX-License-Identifier: BSD-3-Clause
 -->
-# Package branch — CentOS 10 Stream (`c10s`)
 
-**This is the branch you work on.** It holds your package's spec file and
-`sources` pointer, plus the CI workflows that build and publish them.
+# pkg-rpm-video-driver
 
-Following the Fedora/CentOS **dist-git** convention, each distro stream gets its
-own branch, and the packaging files live at the branch root:
+RPM packaging repository for the **Qualcomm Video Driver** (`iris-vpu` DKMS
+kernel module) targeting **CentOS 10 Stream** (`c10s`).
 
-| Branch | Stream | Contents |
+This repository does **not** contain the driver source code. It holds the
+RPM spec file and the SHA-512 checksum (`sources`) that together allow
+GitHub CI to fetch the upstream source tarball, verify its integrity, and
+build distributable RPM packages.
+
+---
+
+## About the Video Driver
+
+The video driver provides VPU (Video Processing Unit) support for Qualcomm
+Snapdragon targets. It is required to use VPU hardware for hardware-accelerated
+video encode and decode.
+
+The VPU is a multi-pipe hardware block that offloads video stream processing
+from the application processor (AP). It communicates with the AP through a
+well-defined protocol called the **Host Firmware Interface (HFI)**, which
+provides fine-grained and asynchronous control over individual hardware
+features.
+
+**Supported codecs:**
+
+| Operation | Codecs |
+|-----------|--------|
+| Decode | H.264, H.265, VP9, AV1 |
+| Encode | H.264, H.265 |
+
+**Driver highlights:**
+
+- V4L2-compliant driver with M2M and STREAMING capability.
+- Centralized resource management and core/instance state management.
+- Platform-specific capability definitions — single point of control to
+  enable or disable features per platform.
+- Handles standard video sequences: DRC, Drain, Seek, EOS.
+- Asynchronous communication with hardware for low-latency use cases.
+- Output and capture planes controlled independently, allowing per-plane
+  reconfiguration.
+- Native hardware support for the LAST flag, required for port
+  reconfiguration and DRAIN sequences per V4L2 guidelines.
+
+**Supported platforms:** `hamoa`, `lemans`, `monaco`, `kodiak`, `purwa`
+(iris2 / iris3 variants).
+
+The upstream driver source lives at:
+<https://github.com/qualcomm-linux/video-driver>
+
+---
+
+## Repository Layout
+
+```
+video-driver.spec   # RPM spec — build instructions, version, dependencies
+sources             # SHA-512 checksum of the upstream source tarball
+LICENSE.txt         # Repository license
+README.md           # This file
+```
+
+### `video-driver.spec`
+
+Defines how the RPM is built:
+
+- **Package name / version:** `video-driver-<version>`
+- **Build type:** `noarch` DKMS package — the kernel module is compiled on
+  the target machine at install time, not at RPM build time.
+- **Runtime dependencies:** `dkms` (required), `kernel-devel` (recommended).
+- **Conflicts:** `qcom-iris-dkms` (the in-tree Qualcomm iris driver).
+- **`%post` scriptlet:** registers the module with DKMS, builds it for the
+  running kernel, blacklists the in-tree `qcom_iris` driver, and loads
+  `iris_vpu`.
+- **`%preun` scriptlet:** unloads `iris_vpu`, removes the DKMS registration,
+  and cleans up blacklist and auto-load entries before package removal.
+
+### `sources`
+
+Contains the SHA-512 checksum of the upstream source tarball in
+Fedora/CentOS dist-git format:
+
+```
+# Example:
+SHA512 (video-driver-<version>.tar.gz) = <sha512-checksum>
+```
+
+The tarball itself is **never committed to git**. CI fetches it from the
+upstream GitHub release URL recorded in `Source0:` inside the spec, then
+verifies it against this checksum before building.
+
+---
+
+## CI Workflows
+
+GitHub Actions workflows (`.github/workflows/`) automate the full
+build-and-release cycle:
+
+| Workflow | Trigger | What it does |
 |---|---|---|
-| `main` | — | Template docs, onboarding guide, community files. Nothing is built here. |
-| **`c10s`** | CentOS 10 Stream | **This branch.** Your spec + `sources` + workflows. |
+| `build-on-pr` | Pull request | Fetches the tarball, verifies the SHA-512 checksum, builds the RPM(s), and uploads them as workflow artifacts. |
+| `pkg-release` | Manual (`Actions → Release → Run workflow`) | Builds and publishes the RPM(s) to Artifactory after a reviewer approves the `pkg-release-approval` gate. |
 
-Full onboarding guide, configuration reference, and troubleshooting live on
-[`main`](../../tree/main) — see its `README.md` and `docs/workflows.md`.
-
----
-
-## Layout
-
-```
-mypackage.spec.example   # rename to <your-component>.spec
-sources.example          # rename to sources
-.github/workflows/       # build-on-pr.yml, pkg-release.yml
-```
-
-The two starter files carry a `.example` suffix on purpose. The build expects
-**exactly one** `*.spec` at the root, so the suffix keeps the skeleton invisible
-to CI until you rename it — otherwise a fresh repo's first PR would fail with
-`Multiple spec files`.
+Download built RPMs from the **Artifacts** section of the `build-on-pr` run.
 
 ---
 
-## Getting started
+## Updating the Package Version
 
-### 1. Rename the starter files
+Two files must be updated together every time the upstream driver version
+changes:
+
+### 1. Update the spec file
+
+Bump `Version:` in `video-driver.spec`. If the upstream tarball URL path
+also changed, update `Source0:` accordingly.
+
+```spec
+# Example:
+Version:  <new-version>
+```
+
+### 2. Recompute the checksum
+
+Download the new tarball and regenerate `sources`:
 
 ```bash
-git mv mypackage.spec.example video-driver.spec
-git mv sources.example sources
+# Example:
+sha512sum --tag video-driver-<new-version>.tar.gz > sources
 ```
 
-### 2. Edit the spec
-
-Set `Name:`, `Version:`, `Summary:`, `License:`, the build/install sections, and
-`%files`. `Source0:` must be a real, fetchable URL whose **filename matches the
-`sources` entry**:
+The resulting `sources` file should look like:
 
 ```
-Source0: https://github.com/qualcomm-linux/video-driver/archive/refs/tags/v%{version}.tar.gz#/video-driver-%{version}.tar.gz
+# Example:
+SHA512 (video-driver-<new-version>.tar.gz) = <new-sha512-checksum>
 ```
 
-### 3. Record the tarball checksum
+### 3. Open a pull request
 
-**The tarball is never committed to git.** Only its checksum is:
+Commit both changes and open a PR against this branch. The `build-on-pr`
+workflow will fetch the new tarball, verify the checksum, and build the
+updated RPM(s).
 
-```bash
-sha512sum --tag video-driver-1.0.tar.gz > sources
-```
+### 4. Release
 
-which yields a line like:
-
-```
-SHA512 (video-driver-1.0.tar.gz) = 3a7bd3e2360a3d29eea436fcfb7e44c735d117c...
-```
-
-### 4. Open a PR against this branch
-
-`build-on-pr` fetches the tarball (from the lookaside cache, or from the spec's
-`Source` URL on a cache miss), verifies the checksum, and builds the RPM(s).
-Download them from the run's **Artifacts**.
-
-
-### 5. Release
-
-**Actions → Release → Run workflow**, selecting this branch. A reviewer approves
-the `pkg-release-approval` gate, then the RPM(s) publish to Artifactory.
+Once the PR is merged, request the maintainer to trigger **Actions → Release → Run workflow**
+on this branch. After reviewer approval the new RPM(s) are published to Artifactory.
 
 ---
 
-## Updating the version
+## Getting in Contact
 
-Two edits, every time:
+Issues specific to the video driver source should be reported in the Issues
+section of the upstream repository:
+<https://github.com/qualcomm-linux/video-driver>
 
-1. Bump `Version:` in the spec (and the `Source0:` URL if its path changed).
-2. Recompute the checksum:
-   ```bash
-   sha512sum --tag video-driver-<newversion>.tar.gz > sources
-   ```
-
-Commit both, open a PR, merge, then run **Release**. The first release fetches
-the new upstream tarball, verifies it, and caches it back automatically.
+Issues specific to this RPM packaging repository (spec file, CI workflows,
+checksum) should be reported in the Issues section of this repository.
 
 ---
 
@@ -102,3 +169,6 @@ the new upstream tarball, verifies it, and caches it back automatically.
 pkg-rpm-video-driver BSD 3-Clause License
 
 **pkg-rpm-video-driver** is licensed under **BSD 3-Clause License** See [LICENSE.txt](https://github.com/qualcomm-linux/pkg-rpm-video-driver/blob/main/LICENSE.txt) for the full license text.
+
+The video driver source code is released under **GPL-2.0-only**. See the
+upstream repository for its full license text.
