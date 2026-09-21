@@ -1,8 +1,7 @@
-# SPDX-License-Identifier: GPL-2.0-only
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 
 Name:           iris-vpu
-Version:        1.0.20
+Version:        1.0.28
 Release:        3%{?dist}
 Summary:        DKMS package for MSM VIDC video driver (out-of-tree)
 License:        GPL-2.0-only
@@ -69,6 +68,7 @@ install -m 755 pkg-iris-vpu/scripts/set-build-env.sh       "${DKMS_SRC_DIR}/scri
 install -m 755 pkg-iris-vpu/scripts/cross-compile.sh       "${DKMS_SRC_DIR}/scripts/"
 
 cat > "${DKMS_SRC_DIR}/scripts/dkms-build-wrapper.sh" << 'WRAPPER_EOF'
+#!/bin/bash
 
 echo "Starting DKMS build for iris-vpu..."
 
@@ -126,7 +126,7 @@ chmod 755 "${DKMS_SRC_DIR}/scripts/dkms-build-wrapper.sh"
 KERNEL_VERSION=$(uname -r)
 MODULE_NAME="iris-vpu"
 DRIVER_VERSION="%{version}"
-BLACKLIST_FILE="/etc/modprobe.d/blacklist-video.conf"
+BLACKLIST_FILE="/etc/modprobe.d/iris-vpu-blacklist.conf"
 DKMS_BUILD_SUCCESS=false
 
 echo "Configuring iris-vpu-dkms..."
@@ -205,21 +205,14 @@ fi
 
 # 7. Blacklist qcom_iris in /etc/modprobe.d/ (runtime, not initramfs-managed)
 echo "Adding qcom_iris to module blacklist..."
-if [ -f "$BLACKLIST_FILE" ]; then
-    if ! grep -q "blacklist qcom_iris" "$BLACKLIST_FILE"; then
-        echo "" >> "$BLACKLIST_FILE"
-        echo "# Added by iris-vpu RPM package" >> "$BLACKLIST_FILE"
-        echo "blacklist qcom_iris" >> "$BLACKLIST_FILE"
-        echo "install qcom_iris /bin/true" >> "$BLACKLIST_FILE"
-    fi
-else
-    mkdir -p /etc/modprobe.d
-    {
-        echo "# Blacklist for iris-vpu RPM package"
-        echo "blacklist qcom_iris"
-        echo "install qcom_iris /bin/true"
-    } > "$BLACKLIST_FILE"
-fi
+
+mkdir -p /etc/modprobe.d
+
+cat > "$BLACKLIST_FILE" << 'EOF'
+# Blacklist for iris-vpu RPM package
+blacklist qcom_iris
+install qcom_iris /bin/true
+EOF
 
 # 8. Load iris_vpu module (only if the build succeeded)
 if [ "$DKMS_BUILD_SUCCESS" = true ]; then
@@ -232,13 +225,8 @@ if [ "$DKMS_BUILD_SUCCESS" = true ]; then
         else
             echo "Warning: iris_vpu loaded but not detected in lsmod — rolling back..."
             modprobe -r iris_vpu 2>/dev/null || true
-            if [ -f "$BLACKLIST_FILE" ]; then
-                grep -v "blacklist qcom_iris" "$BLACKLIST_FILE" | \
-                    grep -v "install qcom_iris /bin/true" | \
-                    grep -v "# Added by iris-vpu RPM package" > "${BLACKLIST_FILE}.tmp" && \
-                    mv "${BLACKLIST_FILE}.tmp" "$BLACKLIST_FILE" || true
-            fi
-            [ "$QCOM_IRIS_WAS_LOADED" = true ] && modprobe qcom_iris 2>/dev/null || true
+
+	    [ "$QCOM_IRIS_WAS_LOADED" = true ] && modprobe qcom_iris 2>/dev/null || true
         fi
     else
         echo "Warning: Failed to load iris-vpu module immediately."
@@ -265,13 +253,7 @@ if lsmod | grep -q "^iris_vpu "; then
     }
 fi
 
-# 2. Clean up any leftover #MODULE_VERSION# entries
-if dkms status 2>/dev/null | grep -q 'iris-vpu/#MODULE_VERSION#'; then
-    dkms remove -m iris-vpu -v '#MODULE_VERSION#' --all 2>/dev/null || true
-    rm -rf '/var/lib/dkms/iris-vpu/#MODULE_VERSION#' 2>/dev/null || true
-fi
-
-# 3. Remove DKMS module registration
+# 2. Remove DKMS module registration
 if dkms status 2>/dev/null | grep -q "$MODULE_NAME.*$DRIVER_VERSION"; then
     echo "Removing iris-vpu DKMS module..."
     dkms remove -m "$MODULE_NAME" -v "$DRIVER_VERSION" --all 2>/dev/null || {
@@ -279,7 +261,7 @@ if dkms status 2>/dev/null | grep -q "$MODULE_NAME.*$DRIVER_VERSION"; then
     }
 fi
 
-# 4. Check for overlay installation and clean up manually installed files
+# 3. Check for overlay installation and clean up manually installed files
 OVERLAY_FLAG="/var/lib/dkms/iris-vpu-overlay.flag"
 if [ -f "$OVERLAY_FLAG" ]; then
     echo "Detected overlay installation, cleaning up..."
@@ -290,59 +272,31 @@ if [ -f "$OVERLAY_FLAG" ]; then
     [ -d "$DKMS_DIR" ] && [ -z "$(ls -A "$DKMS_DIR" 2>/dev/null)" ] && rmdir "$DKMS_DIR" || true
 fi
 
-# 5. Remove auto-load configuration
+# 4. Remove auto-load configuration
 rm -f /etc/modules-load.d/iris-vpu.conf || true
-sed -i '/^iris_vpu$/d' /etc/modules 2>/dev/null || true
 
-# 6. Remove legacy blacklist entry added by %post
-rm -f /etc/modprobe.d/blacklist-video.conf || true
+# 5. Remove package-owned blacklist configuration
+rm -f /etc/modprobe.d/iris-vpu-blacklist.conf || true
 
 echo "iris-vpu pre-removal completed."
 exit 0
 
+%postun
+
+if [ "$1" -eq 0 ]; then
+    echo "Refreshing module dependency database..."
+    depmod -a || true
+fi
+
+exit 0
+
 %changelog
-* Mon Jul 28 2026 Qualcomm Technologies, Inc. <linux-qcom@qualcomm.com> - 1.0.20-3
-- Fix: pass KERNEL_SRC=/lib/modules/$kernelver/build to make so that
-  video/Kbuild's UBWC-helpers detection (grep on $(KERNEL_SRC)/include/...)
-  succeeds; without it MSM_VIDC_HAS_QCOM_UBWC_HELPERS is unset and the
-  driver redefines qcom_ubwc_* functions already present in the kernel header,
-  causing redefinition errors
-- Fix: patch video/Kbuild in %%install to append
-  "ccflags-y += -Wno-error=attributes" after "ccflags-y += -Werror"; this
-  allows building with GCC < 16 against kernels built with GCC 16+ where
-  the 'counted_by' attribute is used in kernel headers but not supported by
-  the older compiler (the more-specific flag must follow -Werror to win)
-- Fix: capture make exit status explicitly in dkms-build-wrapper.sh and
-  exit with it; previously the wrapper always exited 0 because
-  "echo Build completed successfully!" was the last command, masking make
-  failures from DKMS ("Building module(s)... done." with no .ko produced)
+* Tue Jul 28 2026 Qualcomm Technologies, Inc. <linux-qcom@qualcomm.com> - 1.0.20-3
+- Fix DKMS build compatibility with newer kernels
+- Improve compiler compatibility
+- Fix DKMS build failure reporting
 
-* Mon Jul 28 2026 Qualcomm Technologies, Inc. <linux-qcom@qualcomm.com> - 1.0.20-2
-- Fix: remove "set -e" from dkms-build-wrapper.sh; platform detection is
-  best-effort — failure now falls back to the default QLI config instead of
-  aborting the DKMS build with exit status 1
-- Fix: detect custom kernels with git-hash version suffixes
-  (e.g. 6.18.37-g48143db58c4c) in addition to -dirty and rc kernels
-- Fix: use DKMS-provided $kernelver instead of $(uname -r) in the wrapper
-  so cross-version builds are supported
-- Fix: change BUILT_MODULE_LOCATION[0] from "." to "video" in dkms.conf;
-  the module is built in the video/ subdirectory (per Kbuild: obj-m := video/)
-  so DKMS must look there after the build completes
-- Fix: remove deprecated CLEAN and REMAKE_INITRD directives from installed
-  dkms.conf (caused DKMS 3.4.1 warnings and potential build failures)
-- Fix: remove "set -e" from %%post scriptlet; RPM scriptlets must always
-  exit 0 to avoid aborting the dnf transaction on DKMS build failures
-- Fix: add --force to "dkms build" to ensure a clean rebuild even when a
-  partial build state is left from a previous failed attempt
-- Fix: blacklist qcom_iris regardless of DKMS build outcome so the in-tree
-  driver does not reload on next boot
-- Fix: write iris_vpu to modules-load.d even when modprobe succeeds but
-  the module is not yet visible in lsmod (timing race)
-- Improve: add explicit "exit 0" at end of %%post and %%preun scriptlets
-- Improve: add Recommends: kernel-devel to hint at missing kernel headers
-- Improve: expand error messages to guide users when DKMS build fails
-
-* Thu Jul 24 2025 Qualcomm Technologies, Inc. <linux-qcom@qualcomm.com> - 1.0.20-1
-- Initial RPM packaging of iris-vpu DKMS driver (translated from Debian pkg-iris-vpu)
-- Supports QLI platforms: lemans, hamoa, monaco, kodiak, purwa (iris2/iris3 variants)
-- Blacklists in-tree qcom_iris driver on install
+* Mon Jul 27 2026 Qualcomm Technologies, Inc. <linux-qcom@qualcomm.com> - 1.0.20-2
+- Improve DKMS build handling for custom kernels
+- Fix module discovery and installation paths
+- Improve installation robustness and error messaging
