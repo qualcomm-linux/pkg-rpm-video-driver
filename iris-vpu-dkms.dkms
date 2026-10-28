@@ -1,0 +1,16 @@
+PACKAGE_NAME="iris-vpu"
+PACKAGE_VERSION="#MODULE_VERSION#"
+
+# Build iris_vpu module only
+BUILT_MODULE_NAME[0]="iris_vpu"
+BUILT_MODULE_LOCATION[0]="video"
+DEST_MODULE_LOCATION[0]="/extra/dkms"
+
+# Use wrapper script
+MAKE[0]="scripts/dkms-build-wrapper.sh"
+
+AUTOINSTALL="yes"
+
+# Configuration for custom kernels - minimal changes to fix apport error
+# Disable apport error reporting system for custom kernels
+NO_WEAK_MODULES="yes"
